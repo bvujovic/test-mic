@@ -1,5 +1,5 @@
 //* Test INMP441 I2S microphone on ESP32 and ESP32-C3
-//* Display approximate real-world sound pressure level dB SPL in Serial Monitor
+//* Display RMS and dB (negative - digital relative dB -> dBFS) values in Serial Monitor
 
 #include <Arduino.h>
 #include <driver/i2s.h>
@@ -30,100 +30,8 @@ bool isPaused = false;
 // int16_t sBuffer[BUFFER_LEN];
 int32_t sBuffer[BUFFER_LEN];
 
-// ---------------- RMS CALC ----------------
-float calculateRMS(int32_t *buffer, int samples)
-{
-  double sum = 0.0;
-  // double mean = 0.0;
-  // // ---- Calculate mean (DC offset) ----
-  // for (int i = 0; i < samples; i++)
-  //     mean += buffer[i];
-  // mean /= samples;
-
-  // ---- Calculate RMS ----
-  for (int i = 0; i < samples; i++)
-  {
-    // float sample = buffer[i] - mean;
-    float sample = (buffer[i] >> 8); // align 24-bit
-    // INMP441: 24-bit data inside 32-bit container
-    sample = sample / 8388608.0; // 2^23
-    sum += sample * sample;
-  }
-  float rms = sqrt(sum / samples);
-  return rms;
-}
-
-float calculateRMS_16bit(int16_t *buffer, int samples)
-{
-  double sum = 0.0;
-  double mean = 0.0;
-  // ---- DC offset removal ----
-  for (int i = 0; i < samples; i++)
-    mean += buffer[i];
-  mean /= samples;
-  // ---- RMS calculation ----
-  for (int i = 0; i < samples; i++)
-  {
-    float sample = buffer[i] - mean;
-    // normalize to -1.0 ... +1.0
-    sample = sample / 32768.0;
-    sum += sample * sample;
-  }
-  return sqrt(sum / samples);
-}
-
-// ---------------- DB CONVERSION ----------------
-float rmsToDb(float rms)
-{
-  if (rms < 1e-7)
-    return -100.0; // avoid log(0)
-  return 20.0 * log10(rms);
-}
-
-// ---------------- BASELINE CALIBRATION ----------------
-float baselineDb = -80.0;
-const float triggerOffset = 15.0; // dB above baseline
-const float dbOffset = 100.0;     // adjust this based on actual SPL of your environment at baseline
-
-float calibrateBaseline()
-{
-  Serial.println("Calibrating baseline... stay quiet.");
-  double sumDb = 0.0;
-  int count = 0;
-  ulong start = millis();
-
-  while (millis() - start < 3000)
-  { // 3 seconds
-    size_t bytesRead = 0;
-    i2s_read(I2S_PORT,
-             (void *)sBuffer,
-             sizeof(sBuffer),
-             &bytesRead,
-             portMAX_DELAY);
-    int samples = bytesRead / sizeof(int32_t);
-    float rms = calculateRMS(sBuffer, samples);
-    float db = rmsToDb(rms);
-
-    // Ignore invalid silence values
-    if (db > -95 && db < 0)
-    {
-      sumDb += db;
-      count++;
-    }
-    delay(20);
-  }
-  if (count == 0)
-    return -80.0;
-
-  float avgDb = sumDb / count;
-  Serial.print("Baseline calibrated: ");
-  Serial.print(avgDb, 2);
-  Serial.println(" dB");
-  return avgDb;
-}
-
 // ---------------- SETUP ----------------
-void setup()
+void setup()  
 {
   Serial.begin(115200);
   delay(100);
@@ -151,8 +59,64 @@ void setup()
   Serial.println(i2s_set_pin(I2S_PORT, &pin_config));
   Serial.println(i2s_zero_dma_buffer(I2S_PORT));
   Serial.println("I2S initialized.");
-  delay(1000);
-  baselineDb = calibrateBaseline();
+}
+
+// ---------------- RMS CALC ----------------
+float calculateRMS(int32_t *buffer, int samples)
+{
+  double sum = 0.0;
+  // double mean = 0.0;
+  // // ---- Calculate mean (DC offset) ----
+  // for (int i = 0; i < samples; i++)
+  //     mean += buffer[i];
+  // mean /= samples;
+
+  // ---- Calculate RMS ----
+  for (int i = 0; i < samples; i++)
+  {
+    // float sample = buffer[i] - mean;
+    float sample = (buffer[i] >> 8); // align 24-bit
+    // INMP441: 24-bit data inside 32-bit container
+    sample = sample / 8388608.0; // 2^23
+    sum += sample * sample;
+  }
+
+  float rms = sqrt(sum / samples);
+  return rms;
+}
+
+float calculateRMS_16bit(int16_t *buffer, int samples)
+{
+  double sum = 0.0;
+  double mean = 0.0;
+
+  // ---- DC offset removal ----
+  for (int i = 0; i < samples; i++)
+  {
+    mean += buffer[i];
+  }
+  mean /= samples;
+
+  // ---- RMS calculation ----
+  for (int i = 0; i < samples; i++)
+  {
+    float sample = buffer[i] - mean;
+
+    // normalize to -1.0 ... +1.0
+    sample = sample / 32768.0;
+
+    sum += sample * sample;
+  }
+
+  return sqrt(sum / samples);
+}
+
+// ---------------- DB CONVERSION ----------------
+float rmsToDb(float rms)
+{
+  if (rms < 1e-7)
+    return -100.0; // avoid log(0)
+  return 20.0 * log10(rms);
 }
 
 // ---------------- LOOP ----------------
@@ -192,13 +156,12 @@ void loop()
   // int samples = bytesRead / sizeof(int16_t);
   int samples = bytesRead / sizeof(int32_t);
   float rms = calculateRMS(sBuffer, samples);
-
-  float db = rmsToDb(rms) + dbOffset; // adjust based on environment
-  Serial.print("dB: ");
-  Serial.print(db, 1);
-  // printf("RMS: %.5f   dB: %.0f", rms, db);
-  // printf("RMS: %.5f   dB: %.0f   Bytes Read: %d", rms, db, bytesRead);
-  if (db > baselineDb + dbOffset + triggerOffset)
-    Serial.print("   <-- SOUND DETECTED");
-  Serial.println();
+  // if (rms < 0.002)
+  //     rms = 0;
+  // if (rms > 0.1)
+  {
+    float db = rmsToDb(rms);
+    printf("RMS: %.5f   dB: %.0f\n", rms, db);
+    // printf("RMS: %.5f   dB: %.0f   Bytes Read: %d\n", rms, db, bytesRead);
+  }
 }
